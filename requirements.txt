@@ -5,4 +5,5 @@ pytz
 aiohttp
 aiogram
 groq
-
+pyrogram
+tgcrypto  # Optional, but recommended for faster encryption/decryption operations
