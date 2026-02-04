@@ -13,6 +13,11 @@ import pytz
 from groq import AsyncGroq
 
 # ================= DATABASE =================
+from pyrogram.errors import FloodWait, InputUserDeactivated, UserIsBlocked, PeerIdInvalid
+import traceback
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from pyrogram.errors import FloodWait
 from pymongo import MongoClient
 
 # ================= TELEGRAM =================
@@ -44,8 +49,9 @@ db = client["catverse"]
 cats = db["cats"]
 global_state = db["global"]
 leaderboard_history = db["leaderboard_history"]
-users = db["users"]
-groups = db["groups"]
+# Define the collections
+chatsdb = db.chats
+usersdb = db.users
 
 # ================= LEVELS =================
 
@@ -1979,67 +1985,98 @@ async def member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 By: {actor.first_name}"
         )
 
-# ================= STATS =================
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
+# Broadcasting functions
+async def send_msg(user_id, message):
+    try:
+        await message.copy(chat_id=user_id)
+    except FloodWait as e:
+        await asyncio.sleep(e.x)
+        return await send_msg(user_id, message)
+    except InputUserDeactivated:
+        return 400, f"{user_id} : deactivated\n"
+    except UserIsBlocked:
+        return 400, f"{user_id} : blocked the bot\n"
+    except PeerIdInvalid:
+        return 400, f"{user_id} : user id invalid\n"
+    except Exception:
+        return 500, f"{user_id} : {traceback.format_exc()}\n"
 
-    # Get current user and group stats
-    u = users.count_documents({})
-    g = groups.count_documents({})
-    members = sum(x.get("members", 0) for x in groups.find())
+async def broadcast(_, message):
+    if not message.reply_to_message:
+        await message.reply_text("ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴍᴇssᴀɢᴇ ᴛᴏ ʙʀᴏᴀᴅᴄᴀsᴛ ɪᴛ.")
+        return    
+    exmsg = await message.reply_text("sᴛᴀʀᴛᴇᴅ ʙʀᴏᴀᴅᴄᴀsᴛɪɴɢ!")
+    all_chats = await get_served_chats() or {}
+    all_users = await get_served_users() or {}
+    done_chats = 0
+    done_users = 0
+    failed_chats = 0
+    failed_users = 0
 
-    await update.message.reply_text(
-        f"📊 *Catverse Stats* 😺\n\n"
-        f"👤 Users: *{u}*\n"
-        f"👥 Groups: *{g}*\n"
-        f"🐾 Members: *{members}*",
-        parse_mode="Markdown"
+    # Broadcasting to chats
+    for chat in all_chats:
+        try:
+            await send_msg(chat, message.reply_to_message)
+            done_chats += 1
+            await asyncio.sleep(0.1)
+        except Exception:
+            failed_chats += 1
+
+    # Broadcasting to users
+    for user in all_users:
+        try:
+            await send_msg(user, message.reply_to_message)
+            done_users += 1
+            await asyncio.sleep(0.1)
+        except Exception:
+            failed_users += 1
+
+    if failed_users == 0 and failed_chats == 0:
+        await exmsg.edit_text(
+            f"**sᴜᴄᴄᴇssғᴜʟʟʏ ʙʀᴏᴀᴅᴄᴀsᴛɪɴɢ ✅**\n\n**sᴇɴᴛ ᴍᴇssᴀɢᴇ ᴛᴏ** `{done_chats}` **ᴄʜᴀᴛs ᴀɴᴅ** `{done_users}` **ᴜsᴇʀs**",
+        )
+    else:
+        await exmsg.edit_text(
+            f"**sᴜᴄᴄᴇssғᴜʟʟʏ ʙʀᴏᴀᴅᴄᴀsᴛɪɴɢ ✅**\n\n**sᴇɴᴛ ᴍᴇssᴀɢᴇ ᴛᴏ** `{done_chats}` **ᴄʜᴀᴛs** `{done_users}` **ᴜsᴇʀs**\n\n**ɴᴏᴛᴇ:-** `ᴅᴜᴇ ᴛᴏ sᴏᴍᴇ ɪssᴜᴇ ᴄᴀɴ'ᴛ ᴀʙʟᴇ ᴛᴏ ʙʀᴏᴀᴅᴄᴀsᴛ` `{failed_users}` **ᴜsᴇʀs ᴀɴᴅ** `{failed_chats}` **ᴄʜᴀᴛs**",
+        )
+
+# Stats command
+async def stats(update: Message):
+    # Get the statistics from the database
+    users = len(await get_served_users())
+    chats = len(await get_served_chats())
+    await update.reply_text(
+        f"""ᴛᴏᴛᴀʟ sᴛᴀᴛs ᴏғ 𝓜𝓮𝓸𝓦𝓼𝓽𝓻𝓲𝓬 :
+
+➻ **ᴄʜᴀᴛs :** {chats}
+➻ **ᴜsᴇʀs :** {users}"""
     )
 
-# ================= USER BROADCAST =================
-async def ubroadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    if not context.args:
-        await update.message.reply_text("😾 Message missing!")
-        return
-
-    text = " ".join(context.args)
-    sent = 0
-
-    # Send the broadcast to all users in the database
-    for u in users.find():
+# Promo command
+async def promo(update: Message):
+    if update.reply_to_message:
+        to_send = update.reply_to_message.id
+    if not update.reply_to_message:
+        return await update.reply_text("Reply To Some Post To Broadcast")
+    chats = await get_served_chats() or []
+    users = await get_served_users() or []
+    failed = 0
+    for chat in chats:
         try:
-            await context.bot.send_message(u["_id"], f"🐱 {text}")
-            sent += 1
-        except:
-            users.delete_one({"_id": u["_id"]})  # Cleanup dead users
-
-    await update.message.reply_text(f"😺 User broadcast done\nSent: {sent}")
-
-# ================= GROUP BROADCAST =================
-async def gbroadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    if not context.args:
-        await update.message.reply_text("😾 Message missing!")
-        return
-
-    text = " ".join(context.args)
-    sent = 0
-
-    # Send the broadcast to all groups in the database
-    for g in groups.find():
+            await update.forward_messages(chat_id=int(chat), from_chat_id=update.chat.id, message_ids=to_send)
+            await asyncio.sleep(1)
+        except Exception:
+            failed += 1
+    
+    failed_user = 0
+    for user in users:
         try:
-            await context.bot.send_message(g["_id"], f"🐾 {text}")
-            sent += 1
-        except:
-            groups.delete_one({"_id": g["_id"]})  # Cleanup dead groups
+            await update.forward_messages(chat_id=int(user), from_chat_id=update.chat.id, message_ids=to_send)
+            await asyncio.sleep(1)
+        except Exception as e:
+            failed_user += 1
 
-    await update.message.reply_text(f"😺 Group broadcast done\nSent: {sent}")
+    await update.reply_text(f"**Bʀᴏᴀᴅᴄᴀsᴛ ᴄᴏᴍᴘʟᴇᴛᴇ.** {failed} ɢʀᴏᴜᴘs ᴏʀ ᴜsᴇʀs ᴛʜᴀᴛ ғᴀɪʟᴇᴅ.")
 
     
 #  ================= MAIN =================
@@ -2077,9 +2114,8 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CommandHandler("plp", plp))
-    app.add_handler(CommandHandler("stats", stats_cmd))
-    app.add_handler(CommandHandler("ubroadcast", ubroadcast))
-    app.add_handler(CommandHandler("gbroadcast", gbroadcast))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("promo", promo))
     app.add_handler(ChatMemberHandler(member_update))
     app.add_handler(CommandHandler(
         ["kick", "ban", "mute", "unmute", "unban"],
